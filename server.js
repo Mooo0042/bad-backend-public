@@ -2997,37 +2997,272 @@ app.get('/dashboard/search-tracks', requireAuth, async (req, res) => {
   }
 });
 
-// ----------------------
-// USER MANAGEMENT (admin only)
-// ----------------------
-app.get('/dashboard/users', requireAdmin, (req, res) => res.json(users.map(u => ({
-  id: u.id, username: u.username, role: u.role, created_at: u.created_at, created_by: u.created_by
-}))));
+// ======================
 
-app.post('/dashboard/users', requireAdmin, (req, res) => {
-  const { username, password } = req.body;
-  if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
+// USER MANAGEMENT ROUTES - Updated for is_admin
+
+// ======================
+
+app.get('/dashboard/users', requireAdmin, async (req, res) => {
 
   try {
-    const newUser = createUser(username, password, req.user.username);
-    res.json({
-      id: newUser.id, username: newUser.username, role: newUser.role,
-      created_at: newUser.created_at, created_by: newUser.created_by
-    });
-  } catch (err) {
-    res.status(400).json({ error: err.message });
+
+    const allUsers = await getAllUsers();
+
+    res.json(allUsers.map(u => ({
+
+      id: u.id,
+
+      username: u.username,
+
+      is_admin: u.is_admin,
+
+      role: u.is_admin ? 'admin' : 'user',
+
+      created_at: u.created_at
+
+    })));
+
+  } catch (error) {
+
+    console.error('Error getting users:', error);
+
+    res.status(500).json({ error: 'Failed to get users' });
+
   }
+
 });
 
-app.delete('/dashboard/users/:userId', requireAdmin, (req, res) => {
-  const idx = users.findIndex(u => u.id === req.params.userId);
-  if (idx === -1) return res.status(404).json({ error: 'User not found' });
-  if (users[idx].isAdmin && users.filter(u => u.isAdmin).length <= 1) 
-    return res.status(400).json({ error: 'Cannot delete the last admin user' });
+app.post('/dashboard/users', requireAdmin, async (req, res) => {
 
-  users.splice(idx, 1);
-  saveUsers();
-  res.json({ status: 'deleted' });
+  const { username, password, isAdmin } = req.body;
+
+  if (!username || !password) {
+
+    return res.status(400).json({ error: 'Username and password required' });
+
+  }
+
+  try {
+
+    // Check if username already exists
+
+    const existingUser = await getUserByUsername(username);
+
+    if (existingUser) {
+
+      return res.status(400).json({ error: 'Username already exists' });
+
+    }
+
+    const newUser = await createUserAccount(
+
+      username, 
+
+      password, 
+
+      isAdmin || false, 
+
+      req.user.username
+
+    );
+
+    
+
+    res.json({
+
+      id: newUser.id,
+
+      username: newUser.username,
+
+      is_admin: newUser.isAdmin,
+
+      role: newUser.role,
+
+      created_at: newUser.created_at
+
+    });
+
+  } catch (err) {
+
+    console.error('Error creating user:', err);
+
+    res.status(500).json({ error: err.message });
+
+  }
+
+});
+
+app.delete('/dashboard/users/:userId', requireAdmin, async (req, res) => {
+
+  try {
+
+    const userToDelete = await supabase
+
+      .from('users')
+
+      .select('*')
+
+      .eq('id', req.params.userId)
+
+      .single();
+
+    if (!userToDelete.data) {
+
+      return res.status(404).json({ error: 'User not found' });
+
+    }
+
+    // Prevent deleting the last admin
+
+    if (userToDelete.data.is_admin) {
+
+      const { data: adminUsers } = await supabase
+
+        .from('users')
+
+        .select('id')
+
+        .eq('is_admin', true);
+
+      
+
+      if (adminUsers && adminUsers.length <= 1) {
+
+        return res.status(400).json({ error: 'Cannot delete the last admin user' });
+
+      }
+
+    }
+
+    // Prevent users from deleting themselves
+
+    if (userToDelete.data.id === req.user.id) {
+
+      return res.status(400).json({ error: 'Cannot delete your own account' });
+
+    }
+
+    await deleteUser(req.params.userId);
+
+    res.json({ status: 'deleted' });
+
+  } catch (error) {
+
+    console.error('Error deleting user:', error);
+
+    res.status(500).json({ error: 'Failed to delete user' });
+
+  }
+
+});
+
+app.patch('/dashboard/users/:userId/admin', requireAdmin, async (req, res) => {
+
+  const { isAdmin } = req.body;
+
+  
+
+  if (typeof isAdmin !== 'boolean') {
+
+    return res.status(400).json({ error: 'isAdmin must be a boolean' });
+
+  }
+
+  try {
+
+    const userToUpdate = await supabase
+
+      .from('users')
+
+      .select('*')
+
+      .eq('id', req.params.userId)
+
+      .single();
+
+    if (!userToUpdate.data) {
+
+      return res.status(404).json({ error: 'User not found' });
+
+    }
+
+    // Prevent removing admin from the last admin
+
+    if (userToUpdate.data.is_admin && !isAdmin) {
+
+      const { data: adminUsers } = await supabase
+
+        .from('users')
+
+        .select('id')
+
+        .eq('is_admin', true);
+
+      
+
+      if (adminUsers && adminUsers.length <= 1) {
+
+        return res.status(400).json({ error: 'Cannot remove admin privileges from the last admin' });
+
+      }
+
+    }
+
+    const updatedUser = await updateUserAdminStatus(req.params.userId, isAdmin);
+
+    res.json({
+
+      id: updatedUser.id,
+
+      username: updatedUser.username,
+
+      is_admin: updatedUser.is_admin,
+
+      role: updatedUser.is_admin ? 'admin' : 'user'
+
+    });
+
+  } catch (error) {
+
+    console.error('Error updating user admin status:', error);
+
+    res.status(500).json({ error: 'Failed to update user' });
+
+  }
+
+});
+
+// Mirror routes for /admin prefix
+
+app.get('/admin/users', requireAdmin, async (req, res) => {
+
+  try {
+
+    const allUsers = await getAllUsers();
+
+    res.json(allUsers.map(u => ({
+
+      id: u.id,
+
+      username: u.username,
+
+      is_admin: u.is_admin,
+
+      role: u.is_admin ? 'admin' : 'user',
+
+      created_at: u.created_at
+
+    })));
+
+  } catch (error) {
+
+    console.error('Error getting users:', error);
+
+    res.status(500).json({ error: 'Failed to get users' });
+
+  }
+
 });
 
 // ----------------------
@@ -3106,52 +3341,94 @@ app.get('/admin/search-tracks', requireAuth, async (req, res) => {
   }
 });
 
-// ----------------------
-// ADMIN POST ROUTES
-// ----------------------
+// ======================
+
+// ADMIN POST ROUTES - Updated approve to track approved_by
+
+// ======================
+
 app.post('/admin/approve/:id', requireAuth, async (req, res) => {
+
   try {
+
     // Find submission by timestamp ID (legacy format)
+
     const allSubmissions = await getSubmissions();
+
     const sub = allSubmissions.find(s => new Date(s.created_at).getTime() == req.params.id);
+
     if (!sub) {
+
       return res.status(404).json({ error: 'Submission not found' });
+
     }
 
     if (isSpotifyAuthNeeded()) {
+
       return res.status(401).json({ error: 'Spotify authentication required', authRequired: true });
+
     }
 
     const trackId = extractSpotifyTrackId(sub.spotify_link);
+
     if (!trackId) {
+
       return res.status(400).json({ error: 'Invalid Spotify link' });
+
     }
 
     await addTrackToSpotifyPlaylist(trackId);
 
-    // Update submission in database
+    // Update submission in database with approved_by
+
     await updateSubmission(sub.id, {
+
       approved: true,
-      approved_at: new Date().toISOString()
+
+      approved_at: new Date().toISOString(),
+
+      approved_by: req.user.id // Track who approved it
+
     });
 
-    console.log(`Track approved and added to playlist: ${sub.spotify_link}`);
-    res.json({ status: 'approved', id: new Date(sub.created_at).getTime() });
+    console.log(`Track approved by ${req.user.username}: ${sub.spotify_link}`);
+
+    res.json({ 
+
+      status: 'approved', 
+
+      id: new Date(sub.created_at).getTime(),
+
+      approved_by: req.user.username
+
+    });
 
   } catch (err) {
+
     console.error('Error approving submission:', err);
 
     if (err.message.includes('refresh token') || err.message.includes('Spotify')) {
+
       res.status(401).json({
+
         error: 'Spotify authentication required. Please re-authenticate.',
+
         authRequired: true
+
       });
+
     } else {
+
       res.status(500).json({
+
         error: 'Failed to approve submission: ' + err.message
+
       });
+
     }
+
   }
+
 });
 
 app.post('/admin/block', requireAuth, async (req, res) => {
