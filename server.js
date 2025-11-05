@@ -15,7 +15,7 @@ app.use(bodyParser.json());
 // CORS middleware
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
   res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   
   if (req.method === 'OPTIONS') {
@@ -115,7 +115,6 @@ function loadUsers() {
       console.log(`Loaded ${users.length} users`);
     } else {
       console.log('No users.json found - creating default admin user');
-      // Create default admin user
       users = [{
         id: crypto.randomUUID(),
         username: 'admin',
@@ -156,7 +155,6 @@ function saveData() {
     fs.writeFileSync('submissions.json', JSON.stringify(submissions, null, 2));
     fs.writeFileSync('blocked.json', JSON.stringify(blocked, null, 2));
     
-    // Only save tokens if they exist
     if (tokens && (tokens.access_token || tokens.refresh_token)) {
       fs.writeFileSync('tokens.json', JSON.stringify(tokens, null, 2));
     }
@@ -282,7 +280,7 @@ async function isTrackBlocked(spotifyLink) {
       .select('id')
       .eq('spotify_link', spotifyLink)
       .single();
-    if (error && error.code !== 'PGRST116') throw error; // PGRST116 = no rows returned
+    if (error && error.code !== 'PGRST116') throw error;
     return !!data;
   } catch (error) {
     console.error('Error checking if track is blocked:', error.message);
@@ -306,18 +304,66 @@ async function getUserByUsername(username) {
   }
 }
 
-async function createUser(username, password) {
+async function createUser(username, password, isAdmin = false) {
   try {
     const passwordHash = await bcrypt.hash(password, 10);
     const { data, error } = await supabase
       .from('users')
-      .insert([{ username, password_hash: passwordHash }])
+      .insert([{ 
+        username, 
+        password_hash: passwordHash,
+        is_admin: isAdmin 
+      }])
       .select()
       .single();
     if (error) throw error;
     return data;
   } catch (error) {
     console.error('Error creating user:', error.message);
+    throw error;
+  }
+}
+
+async function getAllUsers() {
+  try {
+    const { data, error } = await supabase
+      .from('users')
+      .select('id, username, is_admin, created_at')
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+    return data || [];
+  } catch (error) {
+    console.error('Error getting all users:', error.message);
+    return [];
+  }
+}
+
+async function deleteUser(userId) {
+  try {
+    const { error } = await supabase
+      .from('users')
+      .delete()
+      .eq('id', userId);
+    if (error) throw error;
+    return true;
+  } catch (error) {
+    console.error('Error deleting user:', error.message);
+    throw error;
+  }
+}
+
+async function updateUserAdminStatus(userId, isAdmin) {
+  try {
+    const { data, error } = await supabase
+      .from('users')
+      .update({ is_admin: isAdmin })
+      .eq('id', userId)
+      .select()
+      .single();
+    if (error) throw error;
+    return data;
+  } catch (error) {
+    console.error('Error updating user admin status:', error.message);
     throw error;
   }
 }
@@ -341,7 +387,6 @@ async function getSpotifyTokens() {
 
 async function saveSpotifyTokens(tokenData) {
   try {
-    // Delete old tokens first
     await supabase.from('spotify_tokens').delete().neq('id', '00000000-0000-0000-0000-000000000000');
 
     const { data, error } = await supabase
@@ -368,7 +413,7 @@ async function migrateDataToSupabase() {
       for (const user of users) {
         const existingUser = await getUserByUsername(user.username);
         if (!existingUser) {
-          await createUser(user.username, user.password);
+          await createUser(user.username, user.password, user.isAdmin || false);
           console.log(`✅ Migrated user: ${user.username}`);
         }
       }
@@ -390,7 +435,7 @@ async function migrateDataToSupabase() {
           await createSubmission(submissionData);
           console.log(`✅ Migrated submission: ${sub.link}`);
         } catch (error) {
-          if (error.code === '23505') { // Unique constraint violation
+          if (error.code === '23505') {
             console.log(`⚠️  Submission already exists: ${sub.link}`);
           } else {
             console.error(`❌ Failed to migrate submission: ${sub.link}`, error.message);
@@ -413,7 +458,7 @@ async function migrateDataToSupabase() {
           await createBlockedTrack(trackData);
           console.log(`✅ Migrated blocked track: ${link}`);
         } catch (error) {
-          if (error.code === '23505') { // Unique constraint violation
+          if (error.code === '23505') {
             console.log(`⚠️  Blocked track already exists: ${link}`);
           } else {
             console.error(`❌ Failed to migrate blocked track: ${link}`, error.message);
@@ -441,7 +486,6 @@ async function migrateDataToSupabase() {
 
     console.log('🎉 Migration to Supabase completed!');
 
-    // Create backup of JSON files
     const backupDir = 'json_backup_' + Date.now();
     if (!fs.existsSync(backupDir)) {
       fs.mkdirSync(backupDir);
@@ -464,21 +508,19 @@ async function migrateDataToSupabase() {
 // Initialize database and migrate data
 async function initializeDatabase() {
   try {
-    // Load existing JSON data first
     loadSubmissions();
     loadBlocked();
     loadTokens();
     loadUsers();
 
-    // Check if we need to migrate
     const existingSubmissions = await getSubmissions();
     const existingBlocked = await getBlockedTracks();
-    const existingUsers = await supabase.from('users').select('id').limit(1);
+    const { data: existingUsers } = await supabase.from('users').select('id').limit(1);
 
     const needsMigration = (
       (submissions.length > 0 && existingSubmissions.length === 0) ||
       (blocked.length > 0 && existingBlocked.length === 0) ||
-      (users.length > 0 && existingUsers.data?.length === 0)
+      (users.length > 0 && existingUsers?.length === 0)
     );
 
     if (needsMigration) {
@@ -487,14 +529,15 @@ async function initializeDatabase() {
       console.log('✅ Database already initialized, skipping migration');
     }
 
-    // Ensure admin user exists
     const adminUser = await getUserByUsername('admin');
     if (!adminUser) {
-      await createUser('admin', ADMIN_PASSWORD);
+      await createUser('admin', ADMIN_PASSWORD, true);
       console.log('✅ Created default admin user');
+    } else if (!adminUser.is_admin) {
+      await updateUserAdminStatus(adminUser.id, true);
+      console.log('✅ Updated admin user with admin privileges');
     }
 
-    // Load tokens from database
     const dbTokens = await getSpotifyTokens();
     if (dbTokens) {
       tokens = {
@@ -515,7 +558,7 @@ async function initializeDatabase() {
   }
 }
 
-// User authentication functions (updated for Supabase)
+// User authentication functions
 async function authenticateUser(username, password) {
   try {
     const user = await getUserByUsername(username);
@@ -526,8 +569,8 @@ async function authenticateUser(username, password) {
       return {
         id: user.id,
         username: user.username,
-        role: 'admin', // For now, all users are admin
-        isAdmin: true,
+        role: user.is_admin ? 'admin' : 'user',
+        isAdmin: user.is_admin,
         created_at: user.created_at
       };
     }
@@ -538,14 +581,14 @@ async function authenticateUser(username, password) {
   }
 }
 
-async function createUserAccount(username, password, createdBy) {
+async function createUserAccount(username, password, isAdmin = false, createdBy = null) {
   try {
-    const newUser = await createUser(username, password);
+    const newUser = await createUser(username, password, isAdmin);
     return {
       id: newUser.id,
       username: newUser.username,
-      role: 'admin',
-      isAdmin: true,
+      role: newUser.is_admin ? 'admin' : 'user',
+      isAdmin: newUser.is_admin,
       created_at: newUser.created_at,
       created_by: createdBy || 'system'
     };
@@ -555,13 +598,10 @@ async function createUserAccount(username, password, createdBy) {
   }
 }
 
-
-
-// Initialize database
 initializeDatabase();
 
 // Session management
-let sessions = new Map(); // sessionId -> { user, createdAt }
+let sessions = new Map();
 
 function createSession(user) {
   const sessionId = crypto.randomUUID();
@@ -576,7 +616,6 @@ function getSessionUser(sessionId) {
   const session = sessions.get(sessionId);
   if (!session) return null;
 
-  // Check if session is expired (24 hours)
   if (Date.now() - session.createdAt > 24 * 60 * 60 * 1000) {
     sessions.delete(sessionId);
     return null;
@@ -585,7 +624,6 @@ function getSessionUser(sessionId) {
   return session.user;
 }
 
-// Middleware to check authentication (any user)
 function requireAuth(req, res, next) {
   const sessionId = req.headers.authorization?.replace('Bearer ', '');
   const user = getSessionUser(sessionId);
@@ -598,7 +636,6 @@ function requireAuth(req, res, next) {
   next();
 }
 
-// Middleware to check admin authentication
 function requireAdmin(req, res, next) {
   const sessionId = req.headers.authorization?.replace('Bearer ', '');
   const user = getSessionUser(sessionId);
@@ -611,12 +648,10 @@ function requireAdmin(req, res, next) {
   next();
 }
 
-// Check if Spotify authentication is needed
 function isSpotifyAuthNeeded() {
   return !tokens.access_token && !tokens.refresh_token;
 }
 
-// Refresh Spotify access token if expired or missing
 async function refreshAccessToken() {
   const now = Date.now();
   
@@ -648,7 +683,6 @@ async function refreshAccessToken() {
 
   const data = await res.json();
 
-  // Update tokens in memory and database
   tokens.access_token = data.access_token;
   tokens.expires_at = Date.now() + data.expires_in * 1000;
   if (data.refresh_token) tokens.refresh_token = data.refresh_token;
@@ -663,14 +697,12 @@ async function refreshAccessToken() {
     });
   } catch (error) {
     console.error('Error saving tokens to database:', error);
-    // Fallback to JSON file
     saveData();
   }
 
   return tokens.access_token;
 }
 
-// Add track to Spotify playlist
 async function addTrackToSpotifyPlaylist(trackId) {
   const accessToken = await refreshAccessToken();
   const url = `https://api.spotify.com/v1/playlists/${PLAYLIST_ID}/tracks`;
@@ -691,13 +723,11 @@ async function addTrackToSpotifyPlaylist(trackId) {
   }
 }
 
-// Extract Spotify track ID from URL
 function extractSpotifyTrackId(url) {
   const m = url.match(/open\.spotify\.com\/track\/([a-zA-Z0-9]+)/);
   return m ? m[1] : null;
 }
 
-// Get track info from Spotify API (including explicit flag)
 async function getTrackInfo(trackId) {
   try {
     const accessToken = await refreshAccessToken();
@@ -725,7 +755,6 @@ async function getTrackInfo(trackId) {
   return null;
 }
 
-// Search for tracks on Spotify
 async function searchSpotifyTracks(query, limit = 10) {
   try {
     const accessToken = await refreshAccessToken();
